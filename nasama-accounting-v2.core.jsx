@@ -8,6 +8,9 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
     // ── BRAND ─────────────────────────────────────────
     const GOLD = "#B8960C", GOLD_D = "#9A7D0A", NAVY = "#1C1C2E", NAVY2 = "#2D2D45";
+    const NASAMA_WORDMARK_SRC = "./nasama_wordmark_transparent.png";
+    const NASAMA_ICON_SRC = "./nasama_icon_white_1024.png";
+    const DEFAULT_REPORTING_START_DATE = "2026-01-01";
 
     // ── CONSTANTS ─────────────────────────────────────
     const DEAL_STAGES = ["Lead", "EOI", "Booking Form Signed", "First Payment Paid", "MOU Signed", "SPA Signed", "Handover", "Commission Earned", "Commission Collected"];
@@ -201,6 +204,8 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
     const ls_get = (k, fb) => { try { const v = localStorage.getItem("na2_" + k); return v ? JSON.parse(v) : fb; } catch { return fb; } };
     const ls_set = (k, v) => { try { localStorage.setItem("na2_" + k, JSON.stringify(v)); } catch { } };
     const ls_remove = (k) => { try { localStorage.removeItem("na2_" + k); } catch { } };
+    const normalizeReportingStartDate = value => value && value >= DEFAULT_REPORTING_START_DATE ? value : DEFAULT_REPORTING_START_DATE;
+    const normalizeSettings = value => ({ ...(value || {}), openingBalanceDate: normalizeReportingStartDate(value?.openingBalanceDate) });
     const normalizeUserEmail = value => (value || "").toLowerCase().trim();
     const normalizeAccessCode = value => (value || "").trim();
     const generateAccessCode = () => String(Math.floor(100000 + Math.random() * 900000));
@@ -971,14 +976,20 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
     // ── LEDGER ENGINE ─────────────────────────────────
     function buildLedger(transactions, accounts) {
       const ledger = {};
-      accounts.forEach(a => { ledger[a.id] = { debit: 0, credit: 0 }; });
-      transactions.filter(t => !t.isVoid).forEach(t => {
-        (t.lines || []).forEach(l => {
+      for (let i = 0; i < accounts.length; i++) {
+        ledger[accounts[i].id] = { debit: 0, credit: 0 };
+      }
+      for (let i = 0; i < transactions.length; i++) {
+        const t = transactions[i];
+        if (t.isVoid) continue;
+        const lines = t.lines || [];
+        for (let j = 0; j < lines.length; j++) {
+          const l = lines[j];
           if (!ledger[l.accountId]) ledger[l.accountId] = { debit: 0, credit: 0 };
           ledger[l.accountId].debit += (l.debit || 0);
           ledger[l.accountId].credit += (l.credit || 0);
-        });
-      });
+        }
+      }
       return ledger;
     }
     function accountBalance(acct, ledger) {
@@ -1707,6 +1718,12 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
         <path d="M50 6 L88 29 L88 74 Q88 90 72 90 L28 90 Q12 90 12 74 L12 29 Z" stroke={GOLD} strokeWidth="7" fill="none" strokeLinejoin="round" />
         <text x="22" y="74" fontFamily="Georgia,serif" fontSize="52" fontWeight="bold" fill={GOLD}>N</text>
       </svg>;
+    }
+    function BrandIcon({ size = 32, style = {} }) {
+      return <img src={NASAMA_ICON_SRC} alt="Nasama icon" style={{ width: size, height: size, objectFit: "contain", display: "block", ...style }} />;
+    }
+    function BrandWordmark({ width = 180, style = {} }) {
+      return <img src={NASAMA_WORDMARK_SRC} alt="Nasama Properties" style={{ width, maxWidth: "100%", height: "auto", display: "block", ...style }} />;
     }
 
     // ── POSTING PREVIEW ────────────────────────────────

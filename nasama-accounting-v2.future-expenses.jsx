@@ -126,10 +126,9 @@ const feEmpty = () => ({
   createdAt: "", updatedAt: ""
 });
 
-const feComputeStatus = (item) => {
+const feComputeStatus = (item, today) => {
   if (item.status === "Paid" || item.status === "Skipped" || item.status === "Cancelled") return item.status;
   if (!item.nextDueDate) return "Planned";
-  const today = new Date(todayStr() + "T12:00:00");
   const due = new Date(item.nextDueDate + "T12:00:00");
   const diffDays = Math.floor((due - today) / (1000 * 60 * 60 * 24));
   if (diffDays < 0) return "Overdue";
@@ -159,7 +158,7 @@ const feComputeMonthlyEquivalent = (item) => {
 };
 
 // ── FUTURE EXPENSES PAGE ────────────────────────────
-function FutureExpensesPage({ accounts, plannedExpenses, setPlannedExpenses, journal, persistTxn, userRole, userEmail, dark }) {
+function FutureExpensesPage({ accounts, ledger, plannedExpenses, setPlannedExpenses, journal, persistTxn, userRole, userEmail, dark }) {
   const [showModal, setShowModal] = useState(false);
   const [showPayModal, setShowPayModal] = useState(false);
   const [editItem, setEditItem] = useState(null);
@@ -175,10 +174,13 @@ function FutureExpensesPage({ accounts, plannedExpenses, setPlannedExpenses, jou
   }, []);
 
   // Auto-compute statuses
-  const enriched = useMemo(() => (plannedExpenses || []).map(item => ({
-    ...item,
-    computedStatus: feComputeStatus(item)
-  })), [plannedExpenses]);
+  const enriched = useMemo(() => {
+    const today = new Date(todayStr() + "T12:00:00");
+    return (plannedExpenses || []).map(item => ({
+      ...item,
+      computedStatus: feComputeStatus(item, today)
+    }));
+  }, [plannedExpenses]);
 
   // Summary KPIs
   const kpis = useMemo(() => {
@@ -323,7 +325,7 @@ function FutureExpensesPage({ accounts, plannedExpenses, setPlannedExpenses, jou
         <option value="Paid">Paid History</option>
         <option value="All">All</option>
       </Sel>
-      {hasPermission(userRole, 'expenses.create') && <button style={C.btn()} onClick={() => { setEditItem(null); setShowModal(true); }}>+ New Expense</button>}
+    {hasPermission(userRole, 'planning.create') && <button style={C.btn()} onClick={() => { setEditItem(null); setShowModal(true); }}>+ New Expense</button>}
     </PageHeader>
 
     {/* Info banner */}
@@ -393,16 +395,16 @@ function FutureExpensesPage({ accounts, plannedExpenses, setPlannedExpenses, jou
               <td style={C.td}>{item.payeeName || "—"}</td>
               <td style={C.td}>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {hasPermission(userRole, 'expenses.create') && status !== "Paid" && status !== "Cancelled" &&
+                  {hasPermission(userRole, 'expenses.create') && status !== "Paid" && status !== "Cancelled" && 
                     <button style={C.btn("success", true)} onClick={() => { setPayItem(item); setShowPayModal(true); }}>💰 Pay</button>
                   }
-                  {hasPermission(userRole, 'expenses.edit') && status !== "Paid" &&
+                  {hasPermission(userRole, 'planning.edit') && status !== "Paid" &&
                     <button style={C.btn("secondary", true)} onClick={() => handleSkip(item)}>⏭️</button>
                   }
-                  {hasPermission(userRole, 'expenses.edit') &&
+                  {hasPermission(userRole, 'planning.edit') &&
                     <button style={C.btn("secondary", true)} onClick={() => { setEditItem(item); setShowModal(true); }}>✏️</button>
                   }
-                  {hasPermission(userRole, 'expenses.edit') && status !== "Paid" &&
+                  {hasPermission(userRole, 'planning.edit') && status !== "Paid" &&
                     <button style={C.btn("danger", true)} onClick={() => handleDelete(item)}>🗑️</button>
                   }
                 </div>
@@ -430,6 +432,7 @@ function FutureExpensesPage({ accounts, plannedExpenses, setPlannedExpenses, jou
     {showPayModal && payItem && <RecordPaymentModal
       item={payItem}
       accounts={accounts}
+      ledger={ledger}
       journal={journal}
       persistTxn={persistTxn}
       userRole={userRole}
@@ -560,7 +563,7 @@ function FutureExpenseModal({ item, accounts, onSave, onClose }) {
 }
 
 // ── RECORD PAYMENT MODAL ────────────────────────────
-function RecordPaymentModal({ item, accounts, journal, persistTxn, userRole, userEmail, onComplete, onClose }) {
+function RecordPaymentModal({ item, accounts, ledger, journal, persistTxn, userRole, userEmail, onComplete, onClose }) {
   const [form, setForm] = useState(() => {
     const grossAED = item.amountExpected ? fromCents(item.amountExpected) : "";
     return {
@@ -579,10 +582,16 @@ function RecordPaymentModal({ item, accounts, journal, persistTxn, userRole, use
   const bankAccounts = accounts.filter(a => a.isBank || a.code === "1001");
   const expenseAccounts = accounts.filter(a => a.type === "Expense").sort((a, b) => a.code.localeCompare(b.code));
 
+  const selectedAccount = accounts.find(a => a.code === form.paidFromCode);
+  const balance = selectedAccount ? accountBalance(selectedAccount, ledger) : 0;
+  const amountC = toCents(form.gross);
+  const isInsufficient = amountC > balance;
+
   const handlePreview = () => {
     if (!form.expenseCode) { toast("Select an expense account", "warning"); return; }
     const gross = parseFloat(form.gross);
     if (!gross || gross <= 0) { toast("Enter a valid amount", "warning"); return; }
+    if (isInsufficient) { toast(`Insufficient funds in ${selectedAccount?.name || 'account'}`, "error"); return; }
     try {
       const txn = journal.postPayment({
         date: form.date, memo: form.memo || item.title,
@@ -590,6 +599,7 @@ function RecordPaymentModal({ item, accounts, journal, persistTxn, userRole, use
         expenseCode: form.expenseCode,
         paidFromCode: form.paidFromCode,
         counterparty: form.counterparty,
+        tags: "planned-settlement",
         commit: false
       });
       setPreview(txn);
@@ -598,6 +608,7 @@ function RecordPaymentModal({ item, accounts, journal, persistTxn, userRole, use
 
   const handleConfirm = async () => {
     if (posting) return;
+    if (isInsufficient) { toast("Cannot post: Insufficient funds", "error"); return; }
     setPosting(true);
     try {
       const txn = journal.postPayment({
@@ -607,10 +618,11 @@ function RecordPaymentModal({ item, accounts, journal, persistTxn, userRole, use
         expenseCode: form.expenseCode,
         paidFromCode: form.paidFromCode,
         counterparty: form.counterparty,
+        tags: "planned-settlement",
         commit: false
       });
-      await persistTxn(txn);
-      onComplete(txn.id);
+      const savedTxn = await persistTxn({ ...txn, planned_expense_id: item.id });
+      onComplete(savedTxn.id);
     } catch (err) {
       toast(err.message, "error");
       setPosting(false);
@@ -659,6 +671,10 @@ function RecordPaymentModal({ item, accounts, journal, persistTxn, userRole, use
             <Sel value={form.paidFromCode} onChange={e => setForm(p => ({ ...p, paidFromCode: e.target.value }))}>
               {bankAccounts.map(a => <option key={a.code} value={a.code}>{a.name}</option>)}
             </Sel>
+              <div style={{ fontSize: 11, marginTop: 4, color: isInsufficient ? "#DC2626" : "#059669", fontWeight: 600 }}>
+                Available Balance: {fmtAED(balance)}
+                {isInsufficient && " ⚠️ Insufficient Funds"}
+              </div>
           </div>
           <div><label style={C.label}>Counterparty</label>
             <Inp value={form.counterparty} onChange={e => setForm(p => ({ ...p, counterparty: e.target.value }))} />

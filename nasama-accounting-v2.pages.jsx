@@ -8,23 +8,49 @@
 function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, plannedExpenses }) {
   const isMobile = window.innerWidth <= 768;
   const isTablet = window.innerWidth <= 1120;
+  const reportingStartLabel = fmtDate(kpis.reportingStartDate || DEFAULT_REPORTING_START_DATE);
   const recentTxns = [...txns].filter(t => !t.isVoid).sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
   const cashAccounts = accounts.filter(a => a.isBank || a.code === "1001");
   const maxCashFlow = Math.max(1, ...kpis.cashFlowSeries.map(item => Math.max(item.inflow, item.outflow, Math.abs(item.net))));
   const maxPerformance = Math.max(1, ...kpis.monthlyPerformance.map(item => Math.max(item.revenue, item.expense, Math.abs(item.net))));
+  const [includePending, setIncludePending] = useState(false);
+
+  // Projected Runway assuming 50% collection of pipeline
+  const projectedRunway = useMemo(() => {
+    const effectiveCash = kpis.cash + (includePending ? (kpis.pendingPipelineCommission * 0.5) : 0);
+    return kpis.avgMonthlyExpense > 0 ? effectiveCash / kpis.avgMonthlyExpense : Infinity;
+  }, [kpis.cash, kpis.pendingPipelineCommission, kpis.avgMonthlyExpense, includePending]);
 
   // Planned expenses KPIs for CEO snapshot
+  const avgMonthlyFixed = (plannedExpenses || []).filter(e => e.expenseType === "recurring").reduce((s, e) => s + feComputeMonthlyEquivalent(e), 0);
   const feKpis = useMemo(() => {
     const today = new Date(todayStr() + "T12:00:00");
     const next30 = new Date(today); next30.setDate(next30.getDate() + 30);
     const active = (plannedExpenses || []).filter(e => !["Paid", "Skipped", "Cancelled"].includes(e.status));
     const overdue = active.filter(e => { if (!e.nextDueDate) return false; return new Date(e.nextDueDate + "T12:00:00") < today; });
     const due30 = active.filter(e => { if (!e.nextDueDate) return false; const d = new Date(e.nextDueDate + "T12:00:00"); return d >= today && d <= next30; });
+    const totalObligations = overdue.reduce((s, e) => s + (e.amountExpected || 0), 0) + due30.reduce((s, e) => s + (e.amountExpected || 0), 0);
+    
+    const availableFunds = kpis.cash + (includePending ? (kpis.pendingPipelineCommission * 0.5) : 0);
+
+    // Calculate historical coverage trend
+    let runningFunds = availableFunds;
+    const coverageSeries = [...kpis.cashFlowSeries].reverse().map((m, i) => {
+      const closingCash = i === 0 ? runningFunds : (runningFunds -= kpis.cashFlowSeries[kpis.cashFlowSeries.length - i].net);
+      const ratio = avgMonthlyFixed > 0 ? closingCash / avgMonthlyFixed : 0;
+      return { label: m.label, ratio };
+    }).reverse();
+
+    const currentCoverage = totalObligations > 0 ? (availableFunds / totalObligations) : Infinity;
+
     return {
       overdueCount: overdue.length, overdueTotal: overdue.reduce((s, e) => s + (e.amountExpected || 0), 0),
-      next30Count: due30.length, next30Total: due30.reduce((s, e) => s + (e.amountExpected || 0), 0)
+      next30Count: due30.length, next30Total: due30.reduce((s, e) => s + (e.amountExpected || 0), 0),
+      coverageRatio: currentCoverage,
+      coverageSeries,
+      maxRatio: Math.max(2, ...coverageSeries.map(s => s.ratio))
     };
-  }, [plannedExpenses]);
+  }, [plannedExpenses, includePending, kpis.cash, kpis.pendingPipelineCommission, kpis.cashFlowSeries]);
   const sectionTitle = (title, sub, actionLabel, actionPage) => <div style={{ padding: "15px 18px 12px", borderBottom: "1px solid #E5E7EB", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
     <div>
       <div style={{ fontWeight: 700, fontSize: 14, color: dark ? "#F3F4F6" : NAVY }}>{title}</div>
@@ -32,6 +58,48 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
     </div>
     {actionLabel && <button style={C.btn("ghost", true)} onClick={() => setPage(actionPage)}>{actionLabel}</button>}
   </div>;
+  const categoryBanner = (eyebrow, title, sub, from, to) => <div style={{ position: "relative", overflow: "hidden", marginBottom: 14, padding: "18px 20px", borderRadius: 18, background: `linear-gradient(135deg, ${from} 0%, ${to} 100%)`, color: "#FFFFFF", boxShadow: `0 14px 34px ${from}22` }}>
+    <div style={{ position: "absolute", top: -34, right: -18, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,.10)" }} />
+    <div style={{ position: "relative" }}>
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.14em", opacity: 0.8, fontWeight: 700, marginBottom: 8 }}>{eyebrow}</div>
+      <div style={{ fontSize: 24, fontWeight: 800, lineHeight: 1.15 }}>{title}</div>
+      <div style={{ fontSize: 13, color: "rgba(255,255,255,.84)", marginTop: 6, maxWidth: 760, lineHeight: 1.6 }}>{sub}</div>
+    </div>
+  </div>;
+  const metricTile = ({ label, value, sub, accent, onClick }) => <div style={{ ...C.card, padding: "16px 18px", border: `1px solid ${accent}28`, background: `linear-gradient(180deg, #FFFFFF 0%, ${accent}10 100%)`, boxShadow: `0 8px 22px ${accent}12`, position: "relative", overflow: "hidden", cursor: onClick ? "pointer" : "default" }} onClick={onClick || undefined}>
+    <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 5, background: accent }} />
+    <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "#6B7280", fontWeight: 700, marginBottom: 8, paddingLeft: 4 }}>{label}</div>
+    <div style={{ fontSize: 24, fontWeight: 800, color: dark ? "#E8E8F0" : NAVY, lineHeight: 1.15, paddingLeft: 4 }}>{value}</div>
+    <div style={{ fontSize: 12, color: "#6B7280", marginTop: 6, lineHeight: 1.5, paddingLeft: 4 }}>{sub}</div>
+  </div>;
+  const liabilitiesRatio = Math.max(0, Math.round((kpis.totalLiabilities / Math.max(kpis.totalAssets, 1)) * 100));
+  const collectedRatio = deals.length ? Math.round((kpis.collectedDealsCount / deals.length) * 100) : 0;
+  const avgOpenDealCommission = kpis.openDealsCount > 0 ? fmtAED(Math.round(kpis.pendingPipelineCommission / kpis.openDealsCount)) : "AED 0.00";
+  const obligationCoverageLabel = feKpis.coverageRatio === Infinity ? "Fully covered" : `${feKpis.coverageRatio.toFixed(1)}x`;
+  const liquidityMetrics = [
+    { label: "Cash & Bank", value: fmtAED(kpis.cash), sub: "Available liquidity across cash and bank", accent: "#2563EB" },
+    { label: "Operating Cash Flow MTD", value: fmtAED(kpis.operatingCashFlowMTD), sub: kpis.currentMonth.label || "Current month", accent: kpis.operatingCashFlowMTD >= 0 ? "#059669" : "#DC2626" },
+    { label: "Operating Cash Flow YTD", value: fmtAED(kpis.operatingCashFlowYTD), sub: `Since ${reportingStartLabel}`, accent: kpis.operatingCashFlowYTD >= 0 ? "#0F766E" : "#B91C1C" },
+    { label: includePending ? "Projected Runway" : "Cash Runway", value: projectedRunway === Infinity ? "Healthy" : `${projectedRunway.toFixed(1)} months`, sub: includePending ? "Assumes 50% pipeline collection success" : "Cash divided by average monthly expense", accent: includePending ? GOLD : "#475569" },
+  ];
+  const profitabilityMetrics = [
+    { label: "Gross Commission", value: fmtAED(kpis.grossCommissionCollected), sub: `Collected since ${reportingStartLabel}`, accent: "#0EA5E9" },
+    { label: "Broker Share", value: fmtAED(kpis.brokerShare), sub: "Commission paid to brokers", accent: "#D97706" },
+    { label: "Net Company Commission", value: fmtAED(kpis.companyNetCommissionRetained), sub: "Retained before overhead", accent: kpis.companyNetCommissionRetained >= 0 ? "#059669" : "#DC2626" },
+    { label: "Net Income", value: fmtAED(kpis.rev - kpis.exp), sub: `After overhead since ${reportingStartLabel}`, accent: (kpis.rev - kpis.exp) >= 0 ? NAVY : "#DC2626" },
+  ];
+  const controlMetrics = [
+    { label: "Net VAT Position", value: fmtAED(kpis.vat), sub: kpis.vat >= 0 ? "Payable VAT balance" : "Recoverable VAT balance", accent: kpis.vat >= 0 ? "#DC2626" : "#059669" },
+    { label: "Liabilities Load", value: `${liabilitiesRatio}%`, sub: "Share of total assets funded by liabilities", accent: liabilitiesRatio > 60 ? "#DC2626" : "#2563EB" },
+    { label: "Overdue Expenses", value: feKpis.overdueCount > 0 ? fmtAED(feKpis.overdueTotal) : "None", sub: `${feKpis.overdueCount} planned items overdue`, accent: feKpis.overdueCount > 0 ? "#DC2626" : "#059669", onClick: () => setPage("futureExpenses") },
+    { label: "Next 30 Days", value: feKpis.next30Count > 0 ? fmtAED(feKpis.next30Total) : "None", sub: `Coverage ${obligationCoverageLabel}`, accent: feKpis.next30Count > 0 ? "#F59E0B" : "#059669", onClick: () => setPage("futureExpenses") },
+  ];
+  const pipelineMetrics = [
+    { label: "Pending Pipeline", value: fmtAED(kpis.pendingPipelineCommission), sub: "Expected commission not yet collected", accent: GOLD },
+    { label: "Open Deals", value: kpis.openDealsCount, sub: "Deals still progressing through the funnel", accent: "#7C3AED" },
+    { label: "Collected Ratio", value: `${collectedRatio}%`, sub: `${kpis.collectedDealsCount} of ${deals.length} deals collected`, accent: collectedRatio >= 50 ? "#059669" : "#2563EB" },
+    { label: "Avg. Pending / Deal", value: avgOpenDealCommission, sub: "Average expected commission per open deal", accent: "#2563EB" },
+  ];
 
   return <div>
     <PageHeader title="Dashboard" sub={`Nasama Properties - ${new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}`}>
@@ -39,68 +107,64 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
       <button style={C.btn("ghost", true)} onClick={() => setPage("banking")}>Review Cash Movement</button>
     </PageHeader>
 
-    <div style={{ display: "grid", gridTemplateColumns: isTablet ? "1fr" : "1.35fr 1fr", gap: 16, marginBottom: 18 }}>
-      <div style={{ ...C.card, padding: 22, background: "linear-gradient(135deg, #1C1C2E 0%, #2D2D45 55%, #3C3C66 100%)", color: "#FFFFFF", border: "none" }}>
-        <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.12em", color: "#D6C27A", fontWeight: 700, marginBottom: 10 }}>CEO Financial Snapshot</div>
-        <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1.2, marginBottom: 8 }}>Cash is {kpis.currentMonth.cashNet >= 0 ? "improving" : "under pressure"} this month.</div>
-        <div style={{ fontSize: 14, color: "#E5E7EB", maxWidth: 760, lineHeight: 1.6 }}>
-          Net cash movement for {kpis.currentMonth.label} is <strong>{fmtAED(kpis.currentMonth.cashNet)}</strong>, while year-to-date net income is <strong>{fmtAED(kpis.rev - kpis.exp)}</strong>.
-          Pending commission in the active pipeline stands at <strong>{fmtAED(kpis.pendingPipelineCommission)}</strong>.
+    <div style={{ ...C.card, marginBottom: 22, padding: 24, background: "linear-gradient(135deg, #1C1C2E 0%, #243B63 52%, #0F766E 100%)", color: "#FFFFFF", border: "none", position: "relative", overflow: "hidden", boxShadow: "0 18px 40px rgba(28,28,46,.28)" }}>
+      <div style={{ position: "absolute", top: -70, right: -35, width: 180, height: 180, borderRadius: "50%", background: "rgba(255,255,255,.08)" }} />
+      <div style={{ position: "absolute", bottom: -40, left: -20, width: 120, height: 120, borderRadius: "50%", background: "rgba(255,255,255,.05)" }} />
+      <div style={{ position: "relative", display: "grid", gridTemplateColumns: isTablet ? "1fr" : "1.35fr 0.95fr", gap: 18, alignItems: "stretch" }}>
+        <div>
+          <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.14em", color: "#D6C27A", fontWeight: 700, marginBottom: 10 }}>Management Cockpit</div>
+          <div style={{ fontSize: 30, fontWeight: 800, lineHeight: 1.15, marginBottom: 10 }}>
+            {kpis.operatingCashFlowMTD >= 0 ? "Operations are generating cash." : "Operations need tighter cash discipline."}
+          </div>
+          <div style={{ fontSize: 14, color: "#E5E7EB", maxWidth: 760, lineHeight: 1.7 }}>
+            Cash movement in {kpis.currentMonth.label || "the current month"} is <strong>{fmtAED(kpis.currentMonth.cashNet)}</strong>. Net company commission retained since {reportingStartLabel} is <strong>{fmtAED(kpis.companyNetCommissionRetained)}</strong>, while pending pipeline stands at <strong>{fmtAED(kpis.pendingPipelineCommission)}</strong>.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 18 }}>
+            {[
+              { label: "Liquidity", tone: "#93C5FD" },
+              { label: "Profitability", tone: "#86EFAC" },
+              { label: "Control / Compliance", tone: "#FCA5A5" },
+              { label: "Pipeline Quality", tone: "#FDE68A" },
+            ].map(item => <span key={item.label} style={{ padding: "6px 12px", borderRadius: 999, border: "1px solid rgba(255,255,255,.12)", background: "rgba(255,255,255,.08)", color: item.tone, fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>{item.label}</span>)}
+          </div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8, marginTop: 18 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           {[
-            { label: "Cash and bank", value: fmtAED(kpis.cash), tone: "#93C5FD" },
-            { label: "Runway", value: kpis.runwayMonths === Infinity ? "Healthy" : `${kpis.runwayMonths.toFixed(1)} mo`, tone: "#86EFAC" },
-            { label: "Net worth", value: fmtAED(kpis.netWorth), tone: "#FDE68A" },
-            { label: "Net VAT", value: fmtAED(kpis.vat), tone: kpis.vat >= 0 ? "#FCA5A5" : "#86EFAC" },
-            { label: "Overdue Expenses", value: feKpis.overdueCount > 0 ? fmtAED(feKpis.overdueTotal) : "None", tone: feKpis.overdueCount > 0 ? "#FCA5A5" : "#86EFAC", onClick: () => setPage("futureExpenses") },
-            { label: "Next 30 Days", value: feKpis.next30Count > 0 ? fmtAED(feKpis.next30Total) : "None", tone: feKpis.next30Count > 0 ? "#FBBF24" : "#86EFAC", onClick: () => setPage("futureExpenses") },
-          ].map((item, i) => <div key={i} style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 12px", cursor: item.onClick ? "pointer" : "default" }} onClick={item.onClick || undefined}>
-            <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: "#CBD5E1", fontWeight: 700 }}>{item.label}</div>
-            <div style={{ fontSize: 15, fontWeight: 800, marginTop: 4, color: item.tone }}>{item.value}</div>
-          </div>)}
-        </div>
-      </div>
-
-      <div style={C.card}>
-        {sectionTitle("Financial Health", "Quick interpretation of the current balance sheet and operating trend")}
-        <div style={{ padding: 18, display: "grid", gap: 12 }}>
-          {[
-            { label: "This month result", value: fmtAED(kpis.currentMonth.net), note: kpis.currentMonth.net >= 0 ? "Profitable month so far" : "Loss this month", color: kpis.currentMonth.net >= 0 ? "#059669" : "#DC2626" },
-            { label: "Liabilities", value: fmtAED(kpis.totalLiabilities), note: `${Math.max(0, Math.round((kpis.totalLiabilities / Math.max(kpis.totalAssets, 1)) * 100))}% of assets`, color: "#DC2626" },
-            { label: "Broker payout YTD", value: fmtAED(kpis.brokerPayoutYTD), note: "Commission expense paid to brokers", color: "#D97706" },
-            { label: "Collected deals", value: `${kpis.collectedDealsCount} / ${deals.length}`, note: `${kpis.openDealsCount} deals still open`, color: "#2563EB" },
-          ].map((row, i) => <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center", paddingBottom: 10, borderBottom: i < 3 ? "1px solid #F3F4F6" : "none" }}>
-            <div>
-              <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.07em", color: "#6B7280", fontWeight: 700 }}>{row.label}</div>
-              <div style={{ fontSize: 12, color: "#6B7280", marginTop: 4 }}>{row.note}</div>
-            </div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: row.color, whiteSpace: "nowrap" }}>{row.value}</div>
+            { label: "Cash & Bank", value: fmtAED(kpis.cash), tone: "#93C5FD" },
+            { label: "Net Company Commission", value: fmtAED(kpis.companyNetCommissionRetained), tone: "#86EFAC" },
+            { label: "Net VAT Position", value: fmtAED(kpis.vat), tone: kpis.vat >= 0 ? "#FCA5A5" : "#86EFAC" },
+            { label: "Pending Pipeline", value: fmtAED(kpis.pendingPipelineCommission), tone: "#FDE68A" },
+          ].map(item => <div key={item.label} style={{ padding: "14px 15px", borderRadius: 14, background: "rgba(255,255,255,.10)", border: "1px solid rgba(255,255,255,.12)", backdropFilter: "blur(4px)" }}>
+            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.10em", color: "#D1D5DB", fontWeight: 700 }}>{item.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: item.tone, marginTop: 8 }}>{item.value}</div>
           </div>)}
         </div>
       </div>
     </div>
 
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 18 }}>
-      {[
-        { l: "Cash and Bank", v: fmtAED(kpis.cash), s: "Available liquidity", c: "#2563EB" },
-        { l: "Net Worth", v: fmtAED(kpis.netWorth), s: "Assets minus liabilities", c: "#0F766E" },
-        { l: "Revenue YTD", v: fmtAED(kpis.rev), s: "Current calendar year", c: "#059669" },
-        { l: "Expenses YTD", v: fmtAED(kpis.exp), s: "Current calendar year", c: "#D97706" },
-        { l: "Net Income YTD", v: fmtAED(kpis.rev - kpis.exp), s: "Current calendar year", c: (kpis.rev - kpis.exp) >= 0 ? NAVY : "#DC2626" },
-        { l: "Pending Pipeline", v: fmtAED(kpis.pendingPipelineCommission), s: "Uncollected expected commission", c: GOLD },
-        { l: "Open Deals", v: kpis.openDealsCount, s: "Not yet collected", c: "#7C3AED" },
-        { l: "Runway", v: kpis.runwayMonths === Infinity ? "Healthy" : `${kpis.runwayMonths.toFixed(1)} months`, s: "Cash divided by avg monthly expense", c: "#475569" },
-      ].map((k, i) => <div key={i} style={{ ...C.card, padding: "16px 18px", borderTop: `4px solid ${k.c}` }}>
-        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#6B7280", fontWeight: 700, marginBottom: 6 }}>{k.l}</div>
-        <div style={{ fontSize: 22, fontWeight: 800, color: dark ? "#E8E8F0" : NAVY }}>{k.v}</div>
-        <div style={{ fontSize: 12, color: "#6B7280", marginTop: 4 }}>{k.s}</div>
-      </div>)}
+    {categoryBanner("Category 1", "Liquidity", "Can the business fund itself comfortably, meet near-term obligations, and keep operational cash moving in the right direction?", "#1D4ED8", "#0F766E")}
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 14, marginBottom: 20 }}>
+      {liquidityMetrics.map(item => <div key={item.label}>{metricTile({ label: item.label, value: item.value, sub: item.sub, accent: item.accent, onClick: item.onClick })}</div>)}
+    </div>
+
+    {categoryBanner("Category 2", "Profitability", "What the brokerage is collecting, what it is sharing with brokers, and what the company actually retains before overhead.", "#0F766E", "#1D4ED8")}
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 14, marginBottom: 20 }}>
+      {profitabilityMetrics.map(item => <div key={item.label}>{metricTile({ label: item.label, value: item.value, sub: item.sub, accent: item.accent })}</div>)}
+    </div>
+
+    {categoryBanner("Category 3", "Control / Compliance", "Focus on VAT exposure, liabilities, upcoming obligations, and whether transaction activity is staying disciplined and reviewable.", "#7C2D12", "#B91C1C")}
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 14, marginBottom: 20 }}>
+      {controlMetrics.map(item => <div key={item.label}>{metricTile({ label: item.label, value: item.value, sub: item.sub, accent: item.accent, onClick: item.onClick })}</div>)}
+    </div>
+
+    {categoryBanner("Category 4", "Pipeline Quality", "How healthy the commission funnel is, where expected value is concentrated, and how efficiently deals are converting into collected revenue.", "#7C3AED", "#B8960C")}
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 14, marginBottom: 20 }}>
+      {pipelineMetrics.map(item => <div key={item.label}>{metricTile({ label: item.label, value: item.value, sub: item.sub, accent: item.accent })}</div>)}
     </div>
 
     <div style={{ display: "grid", gridTemplateColumns: isTablet ? "1fr" : "1.1fr 1.1fr 0.9fr", gap: 16, marginBottom: 16 }}>
       <div style={C.card}>
-        {sectionTitle("Cash Flow Trend", "Last 6 months - bank and cash movement")}
+        {sectionTitle("Liquidity - Cash Flow Trend", "Last 6 months of bank and cash movement")}
         <div style={{ padding: 18 }}>
           {kpis.cashFlowSeries.map((item, i) => <div key={item.key} style={{ marginBottom: i < kpis.cashFlowSeries.length - 1 ? 14 : 0 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
@@ -122,7 +186,7 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
       </div>
 
       <div style={C.card}>
-        {sectionTitle("Revenue vs Expense", "Last 6 months - operating performance")}
+        {sectionTitle("Profitability - Revenue vs Expense", "Last 6 months of operating performance")}
         <div style={{ padding: 18 }}>
           {kpis.monthlyPerformance.map((item, i) => <div key={item.key} style={{ marginBottom: i < kpis.monthlyPerformance.length - 1 ? 14 : 0 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
@@ -144,7 +208,38 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
       </div>
 
       <div style={C.card}>
-        {sectionTitle("Cash by Account", "Live balances from bank and cash ledger", "Go to Banking", "banking")}
+        {sectionTitle("Liquidity - Cash Coverage Trend", "Liquidity vs average fixed costs over the last 6 months")}
+        <div style={{ padding: "0 18px", display: "flex", alignItems: "center", gap: 8, marginTop: -5, marginBottom: 5 }}>
+          <input id="toggle-pending" type="checkbox" checked={includePending} onChange={e => setIncludePending(e.target.checked)} style={{ cursor: "pointer" }} />
+          <label htmlFor="toggle-pending" style={{ fontSize: 11, fontWeight: 600, color: "#6B7280", cursor: "pointer" }}>
+            Include Pending Commission (50% Collection Projection)
+          </label>
+        </div>
+        <div style={{ padding: 18, display: "flex", alignItems: "flex-end", justifyContent: "space-between", height: 180, gap: 10 }}>
+          {feKpis.coverageSeries.map((s, i) => {
+            const heightPct = Math.min(100, (s.ratio / feKpis.maxRatio) * 100);
+            const isHealthy = s.ratio >= 1.2;
+            const isWarning = s.ratio > 0 && s.ratio < 1.1;
+            return <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: isHealthy ? "#059669" : isWarning ? "#DC2626" : "#6B7280" }}>
+                {s.ratio.toFixed(1)}x
+              </div>
+              <div style={{ 
+                width: "100%", 
+                height: `${heightPct}%`, 
+                minHeight: 4,
+                background: isHealthy ? "#86EFAC" : isWarning ? "#FCA5A5" : "#CBD5E1", 
+                borderRadius: "4px 4px 0 0",
+                transition: "height 0.5s ease"
+              }} />
+              <div style={{ fontSize: 10, color: "#6B7280", fontWeight: 600 }}>{s.label}</div>
+            </div>;
+          })}
+        </div>
+      </div>
+
+      <div style={C.card}>
+        {sectionTitle("Liquidity - Cash by Account", "Live balances from bank and cash ledger", "Go to Banking", "banking")}
         <div style={{ padding: "8px 18px" }}>
           {cashAccounts.map((a, i) => {
             const bal = accountBalance(a, ledger);
@@ -163,7 +258,7 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
 
     <div style={{ display: "grid", gridTemplateColumns: isTablet ? "1fr" : "1fr 1fr 1.1fr", gap: 16, marginBottom: 16 }}>
       <div style={C.card}>
-        {sectionTitle("Pipeline by Type", "Expected commission still in the business pipeline", "Open Deals", "deals")}
+        {sectionTitle("Pipeline Quality - By Type", "Expected commission still in the business pipeline", "Open Deals", "deals")}
         <div style={{ padding: 18 }}>
           {kpis.pipelineByType.map((row, i) => <div key={row.type} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "center", paddingBottom: 10, marginBottom: 10, borderBottom: i < kpis.pipelineByType.length - 1 ? "1px solid #F3F4F6" : "none" }}>
             <div>
@@ -176,7 +271,7 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
       </div>
 
       <div style={C.card}>
-        {sectionTitle("Pipeline by Stage", "Where expected commission is currently sitting")}
+        {sectionTitle("Pipeline Quality - By Stage", "Where expected commission is currently sitting")}
         <div style={{ padding: 18 }}>
           {kpis.pipelineStageValue.map((row, i) => <div key={row.stage} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "center", paddingBottom: 10, marginBottom: 10, borderBottom: i < kpis.pipelineStageValue.length - 1 ? "1px solid #F3F4F6" : "none" }}>
             <div>
@@ -189,7 +284,7 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
       </div>
 
       <div style={C.card}>
-        {sectionTitle("Top Expense Categories", "Year-to-date spend concentration", "Open Payments", "payments")}
+        {sectionTitle("Control / Profitability - Top Expense Categories", `Spend concentration since ${reportingStartLabel}`, "Open Payments", "payments")}
         <div style={{ padding: 18 }}>
           {kpis.topExpenseCategories.length === 0 && <div style={{ color: "#9CA3AF", fontSize: 13, textAlign: "center", padding: "18px 0" }}>No expense activity recorded yet.</div>}
           {kpis.topExpenseCategories.map((row, i) => {
@@ -207,7 +302,7 @@ function Dashboard({ accounts, txns, deals, kpis, ledger, setPage, dark, planned
     </div>
 
     <div style={C.card}>
-      {sectionTitle("Recent Transactions", "Latest journal activity across the company", "Open Journal", "journal")}
+      {sectionTitle("Control / Compliance - Recent Transactions", "Latest journal activity across the company", "Open Journal", "journal")}
       <div style={{ padding: "4px 18px 12px" }}>
         {recentTxns.length === 0 && <div style={{ textAlign: "center", padding: 30, color: "#9CA3AF", fontSize: 13 }}>No transactions yet. Start by recording a sale receipt or payment.</div>}
         {recentTxns.map((t, i) => {
@@ -1924,22 +2019,23 @@ function VATPage({ accounts, txns, ledger, settings }) {
 //  SETTINGS PAGE
 // ╚══════════════════════════════════════════════════╝
 function SettingsPage({ settings, setSettings, userRole, accounts, txns, saveTxn, persistTxn }) {
-  const [s, setS] = useState({ ...settings });
+  const [s, setS] = useState(() => normalizeSettings(settings));
   const save = () => {
-    setSettings(s);
+    const nextSettings = normalizeSettings(s);
+    setSettings(nextSettings);
     // Create opening balance transaction if amount > 0
-    if (s.openingBalance > 0 && accounts && saveTxn) {
+    if (nextSettings.openingBalance > 0 && accounts && saveTxn) {
       const bankA = accounts.find(a => a.code === "1002");
       const capitalA = accounts.find(a => a.code === "3000");
       if (bankA && capitalA) {
         const existingOB = txns?.find(t => t.tags?.includes("opening-balance"));
         if (!existingOB) {
-          const amountCents = toCents(s.openingBalance);
+          const amountCents = toCents(nextSettings.openingBalance);
           const lines = [
             { id: uid(), accountId: bankA.id, debit: amountCents, credit: 0, memo: `Opening Balance — Bank deposit`, deal_id: null, broker_id: null, developer_id: null },
             { id: uid(), accountId: capitalA.id, debit: 0, credit: amountCents, memo: `Opening Balance — Capital Injection`, deal_id: null, broker_id: null, developer_id: null }
           ];
-          const txn = { id: uid(), date: s.openingBalanceDate || todayStr(), description: "Opening Balance", ref: `OB-${Date.now().toString(36).toUpperCase()}`, counterparty: "Opening Balance", tags: "opening-balance", txnType: "JV", isVoid: false, lines, createdAt: new Date().toISOString() };
+          const txn = { id: uid(), date: nextSettings.openingBalanceDate, description: "Opening Balance", ref: `OB-${Date.now().toString(36).toUpperCase()}`, counterparty: "Opening Balance", tags: "opening-balance", txnType: "JV", isVoid: false, lines, createdAt: new Date().toISOString() };
           saveTxn(txn);
         }
       }
@@ -1960,7 +2056,7 @@ function SettingsPage({ settings, setSettings, userRole, accounts, txns, saveTxn
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>🏦 Opening Balance</div>
         <div style={C.fg}>
           <div><label style={C.label}>Opening Balance (AED)</label><Inp type="number" step="0.01" value={s.openingBalance || 0} onChange={e => setS(p => ({ ...p, openingBalance: parseFloat(e.target.value) || 0 }))} placeholder="e.g., 95548.02" /></div>
-          <div><label style={C.label}>As of Date</label><Inp type="date" value={s.openingBalanceDate || todayStr()} onChange={e => setS(p => ({ ...p, openingBalanceDate: e.target.value }))} /></div>
+          <div><label style={C.label}>As of Date</label><Inp type="date" value={normalizeReportingStartDate(s.openingBalanceDate)} min={DEFAULT_REPORTING_START_DATE} onChange={e => setS(p => ({ ...p, openingBalanceDate: e.target.value }))} /></div>
         </div>
         <div style={{ fontSize: 12, color: "#6B7280", marginTop: 8 }}>This will create an opening balance journal entry (OB) debiting Bank and crediting Capital Injection on save.</div>
       </div>
@@ -2623,7 +2719,7 @@ function App({ userRole, userAccess, userEmail, signOut }) {
   const [brokers, setBrokers] = useState(() => ls_get("brokers", SEED_BROKERS));
   const [plannedExpenses, setPlannedExpenses] = useState(() => ls_get("planned_expenses", []));
   const [developers, setDevelopers] = useState(() => ls_get("developers", SEED_DEVELOPERS));
-  const [settings, setSettings] = useState(() => ls_get("settings", { company: "Nasama Properties Company LLC", trn: "", vatRate: 5, currency: "AED", openingBalance: 0, openingBalanceDate: todayStr() }));
+  const [settings, setSettings] = useState(() => ls_get("settings", { company: "Nasama Properties Company LLC", trn: "", vatRate: 5, currency: "AED", openingBalance: 0, openingBalanceDate: DEFAULT_REPORTING_START_DATE }));
   const [page, setPage] = useState(() => canAccessPage(userAccess || userRole, "dashboard") ? "dashboard" : "deals");
   const [dark, setDark] = useState(false);
   const [fbLoaded, setFbLoaded] = useState(false);
@@ -2688,8 +2784,8 @@ function App({ userRole, userAccess, userEmail, signOut }) {
     const u8 = db.collection('settings').doc('company').onSnapshot(snap => {
       setConnected(true); // Connected
       if (!mounted) return;
-      if (snap.exists) { const d = snap.data(); setSettings(d); ls_set('settings', d); }
-      else { fsSaveSettings({ company: "Nasama Properties Company LLC", trn: "", vatRate: 5, currency: "AED" }).catch(console.error); }
+      if (snap.exists) { const d = normalizeSettings(snap.data()); setSettings(d); ls_set('settings', d); }
+      else { fsSaveSettings({ company: "Nasama Properties Company LLC", trn: "", vatRate: 5, currency: "AED", openingBalance: 0, openingBalanceDate: DEFAULT_REPORTING_START_DATE }).catch(console.error); }
       done();
     }, err => {
       console.error('settings', err);
@@ -2731,7 +2827,13 @@ function App({ userRole, userAccess, userEmail, signOut }) {
   const setBrokersFS = fsUpdate('brokers', setBrokers, 'brokers');
   const setDevelopersFS = fsUpdate('developers', setDevelopers, 'developers');
   const setPlannedExpensesFS = fsUpdate('planned_expenses', setPlannedExpenses, 'planned_expenses');
-  const setSettingsFS = (s) => { setSettings(s); ls_set('settings', s); showSync(); fsSaveSettings(s).catch(e => toast(`Settings error: ${e.message}`, "error")); };
+  const setSettingsFS = (s) => {
+    const nextSettings = normalizeSettings(s);
+    setSettings(nextSettings);
+    ls_set('settings', nextSettings);
+    showSync();
+    fsSaveSettings(nextSettings).catch(e => toast(`Settings error: ${e.message}`, "error"));
+  };
 
   // Ledger & Journal
   const ledger = useMemo(() => buildLedger(txns, accounts), [txns, accounts]);
@@ -2767,8 +2869,9 @@ function App({ userRole, userAccess, userEmail, signOut }) {
   // KPIs
   const kpis = useMemo(() => {
     const now = new Date();
+    const reportingStartDate = normalizeReportingStartDate(settings?.openingBalanceDate);
+    const reportingStartMonthKey = reportingStartDate.slice(0, 7);
     const currentYear = now.getFullYear();
-    const currentYearKey = String(currentYear);
     const currentMonthKey = `${currentYear}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     const accountById = new Map(accounts.map(a => [a.id, a]));
     const banks = accounts.filter(a => a.isBank || a.code === "1001");
@@ -2788,6 +2891,8 @@ function App({ userRole, userAccess, userEmail, signOut }) {
     const netWorth = totalAssets - totalLiabilities;
     let rev = 0, exp = 0;
     let brokerPayoutYTD = 0;
+    let operatingCashFlowMTD = 0;
+    let operatingCashFlowYTD = 0;
     const expenseYTDByAccount = new Map();
 
     const makeMonthKey = dateStr => (dateStr || "").slice(0, 7);
@@ -2798,14 +2903,17 @@ function App({ userRole, userAccess, userEmail, signOut }) {
     const last6MonthKeys = Array.from({ length: 6 }, (_, i) => {
       const d = new Date(currentYear, now.getMonth() - (5 - i), 1);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    });
+    }).filter(key => key >= reportingStartMonthKey);
     const perfMap = new Map(last6MonthKeys.map(key => [key, { revenue: 0, expense: 0 }]));
     const cashMap = new Map(last6MonthKeys.map(key => [key, { inflow: 0, outflow: 0 }]));
 
-    txns.filter(t => !t.isVoid).forEach(t => {
+    for (let i = 0; i < txns.length; i++) {
+      const t = txns[i];
+      if (t.isVoid) continue;
+
       const monthKey = makeMonthKey(t.date);
       const lines = t.lines || [];
-      const inCurrentYear = (t.date || "").startsWith(currentYearKey);
+      const inReportingPeriod = (t.date || "") >= reportingStartDate;
       const monthPerf = perfMap.get(monthKey);
       let txnRevenue = 0;
       let txnExpense = 0;
@@ -2816,12 +2924,12 @@ function App({ userRole, userAccess, userEmail, signOut }) {
         if (a.type === "Revenue") {
           const amount = (l.credit || 0) - (l.debit || 0);
           txnRevenue += amount;
-          if (inCurrentYear) rev += amount;
+          if (inReportingPeriod) rev += amount;
         }
         if (a.type === "Expense") {
           const amount = (l.debit || 0) - (l.credit || 0);
           txnExpense += amount;
-          if (inCurrentYear) {
+          if (inReportingPeriod) {
             exp += amount;
             expenseYTDByAccount.set(a.id, (expenseYTDByAccount.get(a.id) || 0) + amount);
             if ((a.name || "").toLowerCase().includes("broker") || (a.code || "").startsWith("55")) brokerPayoutYTD += amount;
@@ -2833,17 +2941,18 @@ function App({ userRole, userAccess, userEmail, signOut }) {
         monthPerf.expense += txnExpense;
       }
 
+      const financingTagText = (t.tags || "").toLowerCase();
       const cashBucket = cashMap.get(monthKey);
+      const bankLines = lines.filter(l => {
+        const a = accountById.get(l.accountId);
+        return a && (a.isBank || a.code === "1001");
+      });
+      const nonBankOperationalLines = lines.filter(l => {
+        const a = accountById.get(l.accountId);
+        return a && !(a.isBank || a.code === "1001");
+      });
+      const isInternalTransfer = bankLines.length > 0 && nonBankOperationalLines.length === 0;
       if (cashBucket) {
-        const bankLines = lines.filter(l => {
-          const a = accountById.get(l.accountId);
-          return a && (a.isBank || a.code === "1001");
-        });
-        const nonBankOperationalLines = lines.filter(l => {
-          const a = accountById.get(l.accountId);
-          return a && !(a.isBank || a.code === "1001");
-        });
-        const isInternalTransfer = bankLines.length > 0 && nonBankOperationalLines.length === 0;
         if (!isInternalTransfer) {
           bankLines.forEach(l => {
             cashBucket.inflow += (l.debit || 0);
@@ -2851,7 +2960,17 @@ function App({ userRole, userAccess, userEmail, signOut }) {
           });
         }
       }
-    });
+
+      const isOperatingCashTxn = bankLines.length > 0
+        && !isInternalTransfer
+        && !["CI", "OD", "BT"].includes(t.txnType)
+        && !financingTagText.includes("opening-balance");
+      if (isOperatingCashTxn) {
+        const operatingNet = bankLines.reduce((sum, l) => sum + (l.debit || 0) - (l.credit || 0), 0);
+        if (monthKey === currentMonthKey) operatingCashFlowMTD += operatingNet;
+        if (inReportingPeriod) operatingCashFlowYTD += operatingNet;
+      }
+    }
 
     const monthlyPerformance = last6MonthKeys.map(key => {
       const item = perfMap.get(key) || { revenue: 0, expense: 0 };
@@ -2861,6 +2980,11 @@ function App({ userRole, userAccess, userEmail, signOut }) {
       const item = cashMap.get(key) || { inflow: 0, outflow: 0 };
       return { key, label: monthLabel(key), inflow: item.inflow, outflow: item.outflow, net: item.inflow - item.outflow };
     });
+
+    const operatingMargin = rev > 0 ? ((rev - exp) / rev) * 100 : 0;
+    const grossCommissionCollected = rev;
+    const brokerShare = brokerPayoutYTD;
+    const companyNetCommissionRetained = grossCommissionCollected - brokerShare;
 
     const currentMonthPerf = monthlyPerformance.find(item => item.key === currentMonthKey) || { revenue: 0, expense: 0, net: 0 };
     const currentMonthCash = cashFlowSeries.find(item => item.key === currentMonthKey) || { inflow: 0, outflow: 0, net: 0 };
@@ -2890,6 +3014,10 @@ function App({ userRole, userAccess, userEmail, signOut }) {
       rev,
       exp,
       totalAssets,
+      operatingMargin,
+      grossCommissionCollected,
+      brokerShare,
+      companyNetCommissionRetained,
       totalLiabilities,
       totalEquity,
       netWorth,
@@ -2906,6 +3034,8 @@ function App({ userRole, userAccess, userEmail, signOut }) {
       },
       avgMonthlyExpense,
       runwayMonths,
+      operatingCashFlowMTD,
+      operatingCashFlowYTD,
       pendingPipelineCommission,
       pipelineByType,
       pipelineStageValue,
@@ -2913,8 +3043,9 @@ function App({ userRole, userAccess, userEmail, signOut }) {
       openDealsCount,
       brokerPayoutYTD,
       topExpenseCategories,
+      reportingStartDate,
     };
-  }, [accounts, txns, deals, ledger]);
+  }, [accounts, txns, deals, ledger, settings]);
 
   // Loading
   if (!fbLoaded || !userRole) return <div style={{ position: "fixed", inset: 0, background: NAVY, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20 }}>
